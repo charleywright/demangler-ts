@@ -84,8 +84,8 @@ export function demangle(input: string): string {
   const isConst = symbol[0] === "L";
   if (isConst) symbol = symbol.substring(1);
 
-  const isInNamespace = symbol[0] === "N";
-  if (isInNamespace) symbol = symbol.substring(1);
+  const namespacingActive = symbol[0] === "N";
+  if (namespacingActive) symbol = symbol.substring(1);
 
   const namespaceParts: string[] = [];
   while (symbol.length > 0) {
@@ -142,8 +142,13 @@ export function demangle(input: string): string {
     namespaceParts.push(part);
     symbol = symbol.substring(partLen.value);
   }
-
   const name = namespaceParts.pop();
+  if (namespacingActive) {
+    if (symbol[0] !== "E") {
+      return input;
+    }
+    symbol = symbol.substring(1);
+  }
 
   let demangled = isConst ? "const " : "";
   for (const part of namespaceParts) {
