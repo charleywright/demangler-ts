@@ -19,4 +19,8 @@ describe("parse variables", () => {
   test("variables with modifiers", () => {
     expect(demangle("_ZL3bar")).toBe("const bar");
   });
+  test("variables with namespaces", () => {
+    expect(demangle("_ZN1a3barE")).toBe("a::bar");
+    expect(demangle("_ZSt3bar")).toBe("std::bar");
+  });
 });

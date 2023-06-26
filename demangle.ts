@@ -84,18 +84,72 @@ export function demangle(input: string): string {
   const isConst = symbol[0] === "L";
   if (isConst) symbol = symbol.substring(1);
 
-  const nameLen = readDenary(symbol);
-  if (isNaN(nameLen.value)) {
-    return input;
+  const isInNamespace = symbol[0] === "N";
+  if (isInNamespace) symbol = symbol.substring(1);
+
+  const namespaceParts: string[] = [];
+  while (symbol.length > 0) {
+    const appreviation = symbol.substring(0, 2);
+    switch (appreviation) {
+      case "St":
+        namespaceParts.push("std");
+        symbol = symbol.substring(2);
+        continue;
+      case "Sa":
+        namespaceParts.push("std::allocator");
+        symbol = symbol.substring(2);
+        continue;
+      case "Sb":
+        namespaceParts.push("std::basic_string");
+        symbol = symbol.substring(2);
+        continue;
+      case "Ss":
+        namespaceParts.push(
+          "std::basic_string<char,::std::char_traits<char>,::std::allocator<char>>"
+        );
+        symbol = symbol.substring(2);
+        continue;
+      case "Si":
+        namespaceParts.push(
+          "std::basic_istream<char, ::std::char_traits<char> >"
+        );
+        symbol = symbol.substring(2);
+        continue;
+      case "So":
+        namespaceParts.push(
+          "std::basic_ostream<char,::std::char_traits<char>>"
+        );
+        symbol = symbol.substring(2);
+        continue;
+      case "Sd":
+        namespaceParts.push(
+          "std::basic_iostream<char,::std::char_traits<char>>"
+        );
+        symbol = symbol.substring(2);
+        continue;
+      default:
+        break;
+    }
+    const partLen = readDenary(symbol);
+    if (isNaN(partLen.value)) {
+      break;
+    }
+    symbol = symbol.substring(partLen.consumed);
+    if (symbol.length < partLen.value) {
+      return input;
+    }
+    const part = symbol.substring(0, partLen.value);
+    namespaceParts.push(part);
+    symbol = symbol.substring(partLen.value);
   }
-  symbol = symbol.substring(nameLen.consumed);
-  if (symbol.length < nameLen.value) {
-    return input;
-  }
-  const name = symbol.substring(0, nameLen.value);
-  symbol = symbol.substring(nameLen.value);
+
+  const name = namespaceParts.pop();
 
   let demangled = isConst ? "const " : "";
+  for (const part of namespaceParts) {
+    demangled += part + "::";
+  }
   demangled += name;
+
   return demangled;
 }
