@@ -96,6 +96,7 @@ enum Type {
   Decltype = "decltype", // DT
 
   ERROR = "error",
+  RAW = "raw",
 }
 const TypeMapping: { [k: string]: Type } = {
   v: Type.Void,
@@ -152,22 +153,34 @@ class Argument {
         break;
       }
     }
+    if (this.type === Type.ERROR) {
+      const type = readLengthEncoded(str);
+      if (type.consumed > 0) {
+        this.rawType = type.value;
+        this.type = Type.RAW;
+        this.consumend = type.consumed;
+      }
+    }
   }
 
   private child: Argument | null = null;
   private qualifiers: Qualifier[] = [];
   private type: Type = Type.ERROR;
   private consumend: number = 0;
+  private rawType: string = "";
 
   public toString(): string {
+    if (this.type === Type.RAW) {
+      return this.rawType;
+    }
     return this.type;
   }
 }
 
 enum Qualifier {
   Pointer = "*", // P
-  Const = "const ", // K
-  Volatile = "volatile ", // V
+  Const = "const", // K
+  Volatile = "volatile", // V
   Reference = "&", // R
   RValueReference = "&&", // O
 }
@@ -199,17 +212,27 @@ export function demangle(input: string): string {
   }
   let symbol = input.substring(input.indexOf("Z") + 1).replace(/ /g, "");
 
-  const isConst = symbol[0] === "L";
-  if (isConst) symbol = symbol.substring(1);
+  const isVarConst = symbol[0] === "L"; // void(* const baz)(int) = nullptr; = _ZL3baz
+  if (isVarConst) symbol = symbol.substring(1);
 
+  const qualifiers: Qualifier[] = [];
   const namespaceParts: string[] = [];
   let name: string = "";
+
+  if (symbol.startsWith("K")) {
+    qualifiers.push(Qualifier.Const);
+    symbol = symbol.substring(1);
+  }
 
   // Namespacing active
   const isNamespaceEscaped = symbol[0] === "N";
   const isInStdNamespace = symbol.startsWith("St");
   if (isNamespaceEscaped || isInStdNamespace) {
     if (isNamespaceEscaped) symbol = symbol.substring(1);
+    if (symbol.startsWith("K")) {
+      qualifiers.push(Qualifier.Const);
+      symbol = symbol.substring(1);
+    }
 
     while (symbol.length > 0) {
       if (symbol.startsWith("St")) {
@@ -240,15 +263,11 @@ export function demangle(input: string): string {
     }
     name = namePart.value;
     symbol = symbol.substring(namePart.consumed);
-    // Is in a namespace, but not encoded with N...E
-    if (!isNaN(readDenary(symbol).value)) {
-      return input;
-    }
   }
 
   // Variable
   if (symbol.length === 0) {
-    let demangled = isConst ? "const " : "";
+    let demangled = isVarConst ? "const " : "";
     for (const part of namespaceParts) {
       demangled += part + "::";
     }
@@ -260,22 +279,25 @@ export function demangle(input: string): string {
   while (symbol.length > 0) {
     const { arg, consumed } = Argument.parse(symbol);
     if (consumed === 0 || arg === null) {
-      break;
+      /*
+        We've tried to parse the arguments, and encountered something that's not an argument
+        If we're not at the end of the string then we've reached an argument we can't parse
+      */
+      return input;
     }
     argumentTypes.push(arg);
     symbol = symbol.substring(consumed);
   }
 
-  if (argumentTypes.length === 0) {
-    return input;
-  }
-
-  let demangled = isConst ? "const " : "";
+  let demangled = "";
   for (const part of namespaceParts) {
     demangled += part + "::";
   }
   demangled += name + "(";
   demangled += argumentTypes.join(",");
   demangled += ")";
+  for (const qualifier of qualifiers) {
+    demangled += " " + qualifier;
+  }
   return demangled;
 }
