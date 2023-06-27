@@ -17,8 +17,8 @@ function readDenary(str: string): DenaryValue {
   return { value: parseInt(numStr), consumed: i };
 }
 
-type StringValue = ReadResult<string>;
-function readLengthEncoded(str: string): StringValue {
+type LengthEncoded = ReadResult<string>;
+function readLengthEncoded(str: string): LengthEncoded {
   const len = readDenary(str);
   if (isNaN(len.value)) {
     return { consumed: 0, value: "" };
@@ -29,6 +29,52 @@ function readLengthEncoded(str: string): StringValue {
   }
   const value = str.substring(0, len.value);
   return { value, consumed: len.consumed + len.value };
+}
+
+type NamespacedStringValue = ReadResult<Array<string>>;
+function readNamespacedString(str: string): NamespacedStringValue {
+  let ret: NamespacedStringValue = { consumed: 0, value: [] };
+  const isNamespaceEscaped = str[0] === "N";
+  const isInStdNamespace = str.startsWith("St");
+  if (isNamespaceEscaped || isInStdNamespace) {
+    if (isNamespaceEscaped) {
+      str = str.substring(1);
+      ret.consumed += 1;
+    }
+
+    while (str.length > 0) {
+      if (str.startsWith("St")) {
+        str = str.substring(2);
+        ret.consumed += 2;
+        ret.value.push("std");
+        continue; // std::std:: is cursed but valid. Would it be mangled like that though?
+      }
+      const part = readLengthEncoded(str);
+      if (part.consumed === 0) {
+        break;
+      }
+      ret.value.push(part.value);
+      str = str.substring(part.consumed);
+      ret.consumed += part.consumed;
+    }
+
+    if (isNamespaceEscaped) {
+      if (str[0] !== "E" || ret.value.length === 0) {
+        ret.consumed = 0;
+        return ret;
+      }
+      str = str.substring(1);
+      ret.consumed += 1;
+    }
+
+    return ret;
+  }
+  const namePart = readLengthEncoded(str);
+  if (namePart.consumed > 0) {
+    ret.value.push(namePart.value);
+    ret.consumed += namePart.consumed;
+  }
+  return ret;
 }
 
 // class Substitution {
@@ -80,6 +126,9 @@ enum Type {
   Double = "double", // d
   LongDouble = "long double", // e
   Float128 = "__float128", // g
+  Pointer = "*", // P
+  Reference = "&", // R
+  RValueReference = "&&", // O
 
   Member = "member", // TODO: Not sure when this is used, id is "M"
   Imaginary = "imaginary", // TODO: Research "imaginary type qualifier (C 2000)". id is "G"
@@ -119,6 +168,9 @@ const TypeMapping: { [k: string]: Type } = {
   d: Type.Double,
   e: Type.LongDouble,
   g: Type.Float128,
+  P: Type.Pointer,
+  R: Type.Reference,
+  O: Type.RValueReference,
 
   M: Type.Member,
   G: Type.Imaginary,
@@ -143,50 +195,63 @@ class Argument {
     return { arg, consumed: arg.consumed };
   }
 
-  private constructor(str: string) {
-    let checkingQualifiers = true;
-    while (str.length > 0 && checkingQualifiers) {
-      switch (str[0]) {
-        case "K":
-          if (str[1] === "P") {
-            this.isConstPointer = true;
-          } else {
-            this.isConst = true;
-          }
-          str = str.substring(1);
-          this.consumed++;
-          break;
-        case "P":
-          this.isPointer = true;
-          str = str.substring(1);
-          this.consumed++;
-          break;
-        case "V":
-          this.isVolatile = true;
-          str = str.substring(1);
-          this.consumed++;
-          break;
-        case "R":
-          this.isReference = true;
-          str = str.substring(1);
-          this.consumed++;
-          break;
-        case "O":
-          this.isRValueReference = true;
-          str = str.substring(1);
-          this.consumed++;
-          break;
-        default:
-          checkingQualifiers = false;
-          break;
-      }
+  private constructor(str: string, parent = Type.ERROR) {
+    if (str[0] === "K") {
+      this.isConst = true;
+      str = str.substring(1);
+      this.consumed += 1;
+    }
+    if (str[0] === "V") {
+      this.isVolatile = true;
+      str = str.substring(1);
+      this.consumed += 1;
     }
 
-    if (
-      (this.isPointer && this.isReference) ||
-      (this.isPointer && this.isRValueReference) ||
-      (this.isReference && this.isRValueReference)
-    ) {
+    if (str[0] === "P") {
+      str = str.substring(1);
+      this.consumed += 1;
+      this.child = new Argument(str, Type.Pointer);
+      if (this.child.type === Type.ERROR) {
+        return;
+      }
+      this.consumed += this.child.consumed;
+      this.type = Type.Pointer;
+      return;
+    }
+    if (str[0] === "R") {
+      if (
+        parent === Type.Pointer ||
+        parent === Type.Reference ||
+        parent === Type.RValueReference
+      ) {
+        return;
+      }
+      str = str.substring(1);
+      this.consumed += 1;
+      this.child = new Argument(str, Type.Reference);
+      if (this.child.type === Type.ERROR) {
+        return;
+      }
+      this.consumed += this.child.consumed;
+      this.type = Type.Reference;
+      return;
+    }
+    if (str[0] === "O") {
+      if (
+        parent === Type.Pointer ||
+        parent === Type.Reference ||
+        parent === Type.RValueReference
+      ) {
+        return;
+      }
+      str = str.substring(1);
+      this.consumed += 1;
+      this.child = new Argument(str, Type.RValueReference);
+      if (this.child.type === Type.ERROR) {
+        return;
+      }
+      this.consumed += this.child.consumed;
+      this.type = Type.RValueReference;
       return;
     }
 
@@ -194,16 +259,16 @@ class Argument {
     for (const key of keys) {
       if (str.startsWith(key)) {
         this.type = TypeMapping[key];
-        this.consumed = key.length;
+        this.consumed += key.length;
         break;
       }
     }
     if (this.type === Type.ERROR) {
-      const type = readLengthEncoded(str);
-      if (type.consumed > 0) {
-        this.rawType = type.value;
+      const namespacedString = readNamespacedString(str);
+      if (namespacedString.consumed > 0) {
         this.type = Type.RAW;
-        this.consumed += type.consumed;
+        this.rawTypeStr = namespacedString.value.join("::");
+        this.consumed += namespacedString.consumed;
       }
     }
   }
@@ -211,23 +276,27 @@ class Argument {
   private child: Argument | null = null;
   private type: Type = Type.ERROR;
   private consumed: number = 0;
-  private rawType: string = "";
+  private rawTypeStr: string = "";
 
-  private isConst = false; // Refers to the type (int const*)
-  private isReference = false;
-  private isRValueReference = false;
-  private isPointer = false;
-  private isConstPointer = false; // Refers to the pointer (int *const)
+  private isConst = false;
   private isVolatile = false;
 
   public toString(): string {
-    let str = this.type === Type.RAW ? this.rawType : this.type;
-    if (this.isConst) str += " const";
-    if (this.isVolatile) str += " volatile";
-    if (this.isPointer) str += "*";
-    if (this.isConstPointer) str += "const";
-    if (this.isReference) str += "&";
-    if (this.isRValueReference) str += "&&";
+    let str = "";
+    if (this.child !== null) {
+      str += this.child.toString(); // Is recursion the best strategy?
+    }
+    if (this.type === Type.RAW) {
+      str += this.rawTypeStr;
+    } else {
+      str += this.type;
+    }
+    if (this.isVolatile) {
+      str += " volatile";
+    }
+    if (this.isConst) {
+      str += " const";
+    }
     return str;
   }
 }
@@ -262,60 +331,27 @@ export function demangle(input: string): string {
   const isVarConst = symbol[0] === "L"; // void(* const baz)(int) = nullptr; = _ZL3baz
   if (isVarConst) symbol = symbol.substring(1);
 
-  const namespaceParts: string[] = [];
-  let name: string = "";
   let isRetConst = false;
-
   if (symbol.startsWith("K")) {
     isRetConst = true;
     symbol = symbol.substring(1);
   }
-
-  // Namespacing active
-  const isNamespaceEscaped = symbol[0] === "N";
-  const isInStdNamespace = symbol.startsWith("St");
-  if (isNamespaceEscaped || isInStdNamespace) {
-    if (isNamespaceEscaped) symbol = symbol.substring(1);
-    if (symbol.startsWith("K")) {
-      isRetConst = true;
-      symbol = symbol.substring(1);
-    }
-
-    while (symbol.length > 0) {
-      if (symbol.startsWith("St")) {
-        symbol = symbol.substring(2);
-        namespaceParts.push("std");
-        continue; // std::std:: is cursed but valid. Would it be mangled like that though?
-      }
-      const part = readLengthEncoded(symbol);
-      if (part.consumed === 0) {
-        break;
-      }
-      namespaceParts.push(part.value);
-      symbol = symbol.substring(part.consumed);
-    }
-
-    if (isNamespaceEscaped) {
-      if (symbol[0] !== "E" || namespaceParts.length === 0) {
-        return input;
-      }
-      symbol = symbol.substring(1);
-    }
-
-    name = namespaceParts.pop() as string; // Check above for length, so cannot return undefined
-  } else {
-    const namePart = readLengthEncoded(symbol);
-    if (namePart.consumed === 0) {
-      return input;
-    }
-    name = namePart.value;
-    symbol = symbol.substring(namePart.consumed);
+  if (symbol.startsWith("NK")) {
+    isRetConst = true;
+    symbol = "N" + symbol.substring(2);
   }
+
+  const namespaceParts = readNamespacedString(symbol);
+  if (namespaceParts.consumed === 0) {
+    return input;
+  }
+  symbol = symbol.substring(namespaceParts.consumed);
+  const name = namespaceParts.value.pop() as string;
 
   // Variable
   if (symbol.length === 0) {
     let demangled = isVarConst ? "const " : "";
-    for (const part of namespaceParts) {
+    for (const part of namespaceParts.value) {
       demangled += part + "::";
     }
     demangled += name;
@@ -337,11 +373,11 @@ export function demangle(input: string): string {
   }
 
   let demangled = "";
-  for (const part of namespaceParts) {
+  for (const part of namespaceParts.value) {
     demangled += part + "::";
   }
   demangled += name + "(";
-  demangled += argumentTypes.join(",");
+  demangled += argumentTypes.join(", ");
   demangled += ")";
   if (isRetConst) demangled += " const";
   return demangled;
