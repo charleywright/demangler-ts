@@ -46,4 +46,14 @@ describe("parse functions", () => {
       "a::S::const_foo(void) const"
     );
   });
+  test("arguments with qualifiers", () => {
+    expect(demangle("_Z3fooP3bar")).toBe("foo(bar*)");
+    expect(demangle("_Z3fooR3bar")).toBe("foo(bar&)");
+    expect(demangle("_Z3fooPR3bar")).toBe("_Z3fooPR3bar");
+    expect(demangle("_Z3fooK3bar")).toBe("foo(bar const)");
+    expect(demangle("_Z3fooPK3bar")).toBe("foo(bar const*)");
+    expect(demangle("_Z3fooKP3bar")).toBe("foo(bar*const)");
+    expect(demangle("_Z3fooV3bar")).toBe("foo(bar volatile)");
+    // expect(demangle("_Z3fooPKiPi")).toBe("foo(");
+  });
 });

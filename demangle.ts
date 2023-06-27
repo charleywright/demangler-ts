@@ -123,7 +123,6 @@ const TypeMapping: { [k: string]: Type } = {
   M: Type.Member,
   G: Type.Imaginary,
   H: Type.Complex,
-  r: Type.Restrict,
   u: Type.VendorExtendedType,
   U: Type.VendorExtendedQualifier,
   Y: Type.ExternC,
@@ -141,15 +140,61 @@ class Argument {
     if (arg.type === Type.ERROR) {
       return { arg: null, consumed: 0 };
     }
-    return { arg, consumed: arg.consumend };
+    return { arg, consumed: arg.consumed };
   }
 
   private constructor(str: string) {
+    let checkingQualifiers = true;
+    while (str.length > 0 && checkingQualifiers) {
+      switch (str[0]) {
+        case "K":
+          if (str[1] === "P") {
+            this.isConstPointer = true;
+          } else {
+            this.isConst = true;
+          }
+          str = str.substring(1);
+          this.consumed++;
+          break;
+        case "P":
+          this.isPointer = true;
+          str = str.substring(1);
+          this.consumed++;
+          break;
+        case "V":
+          this.isVolatile = true;
+          str = str.substring(1);
+          this.consumed++;
+          break;
+        case "R":
+          this.isReference = true;
+          str = str.substring(1);
+          this.consumed++;
+          break;
+        case "O":
+          this.isRValueReference = true;
+          str = str.substring(1);
+          this.consumed++;
+          break;
+        default:
+          checkingQualifiers = false;
+          break;
+      }
+    }
+
+    if (
+      (this.isPointer && this.isReference) ||
+      (this.isPointer && this.isRValueReference) ||
+      (this.isReference && this.isRValueReference)
+    ) {
+      return;
+    }
+
     const keys = Object.keys(TypeMapping);
     for (const key of keys) {
       if (str.startsWith(key)) {
         this.type = TypeMapping[key];
-        this.consumend = key.length;
+        this.consumed = key.length;
         break;
       }
     }
@@ -158,31 +203,33 @@ class Argument {
       if (type.consumed > 0) {
         this.rawType = type.value;
         this.type = Type.RAW;
-        this.consumend = type.consumed;
+        this.consumed += type.consumed;
       }
     }
   }
 
   private child: Argument | null = null;
-  private qualifiers: Qualifier[] = [];
   private type: Type = Type.ERROR;
-  private consumend: number = 0;
+  private consumed: number = 0;
   private rawType: string = "";
 
-  public toString(): string {
-    if (this.type === Type.RAW) {
-      return this.rawType;
-    }
-    return this.type;
-  }
-}
+  private isConst = false; // Refers to the type (int const*)
+  private isReference = false;
+  private isRValueReference = false;
+  private isPointer = false;
+  private isConstPointer = false; // Refers to the pointer (int *const)
+  private isVolatile = false;
 
-enum Qualifier {
-  Pointer = "*", // P
-  Const = "const", // K
-  Volatile = "volatile", // V
-  Reference = "&", // R
-  RValueReference = "&&", // O
+  public toString(): string {
+    let str = this.type === Type.RAW ? this.rawType : this.type;
+    if (this.isConst) str += " const";
+    if (this.isVolatile) str += " volatile";
+    if (this.isPointer) str += "*";
+    if (this.isConstPointer) str += "const";
+    if (this.isReference) str += "&";
+    if (this.isRValueReference) str += "&&";
+    return str;
+  }
 }
 
 // enum AbreviationTypes {
@@ -215,12 +262,12 @@ export function demangle(input: string): string {
   const isVarConst = symbol[0] === "L"; // void(* const baz)(int) = nullptr; = _ZL3baz
   if (isVarConst) symbol = symbol.substring(1);
 
-  const qualifiers: Qualifier[] = [];
   const namespaceParts: string[] = [];
   let name: string = "";
+  let isRetConst = false;
 
   if (symbol.startsWith("K")) {
-    qualifiers.push(Qualifier.Const);
+    isRetConst = true;
     symbol = symbol.substring(1);
   }
 
@@ -230,7 +277,7 @@ export function demangle(input: string): string {
   if (isNamespaceEscaped || isInStdNamespace) {
     if (isNamespaceEscaped) symbol = symbol.substring(1);
     if (symbol.startsWith("K")) {
-      qualifiers.push(Qualifier.Const);
+      isRetConst = true;
       symbol = symbol.substring(1);
     }
 
@@ -296,8 +343,6 @@ export function demangle(input: string): string {
   demangled += name + "(";
   demangled += argumentTypes.join(",");
   demangled += ")";
-  for (const qualifier of qualifiers) {
-    demangled += " " + qualifier;
-  }
+  if (isRetConst) demangled += " const";
   return demangled;
 }
