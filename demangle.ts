@@ -42,13 +42,23 @@ export class MangledSymbol {
       }
     }
 
-    const nameParts = parseNameParts(this.mangled, offset);
-    if (nameParts.error) {
-      this.error = nameParts.error;
-      return this;
+    if (this.mangled[offset] === "N" || this.mangled[offset] === "S") {
+      const scopedNamePart = ScopedNamePart.parse(this.mangled, offset);
+      if (scopedNamePart.error) {
+        this.error = scopedNamePart.error;
+        return this;
+      }
+      this.parts.push(scopedNamePart.value);
+      offset += scopedNamePart.consumed;
+    } else {
+      const namePart = UnscopedNamePart.parse(this.mangled, offset);
+      if (namePart.error) {
+        this.error = namePart.error;
+        return this;
+      }
+      this.parts.push(namePart.value);
+      offset += namePart.consumed;
     }
-    this.parts.push(...nameParts.parts);
-    offset += nameParts.consumed;
 
     if (this.parts.length === 0) {
       this.error = "No name parts";
@@ -79,14 +89,7 @@ export class MangledSymbol {
 
     this.demangled = "";
     for (const part of this.parts) {
-      if (part instanceof NamePart) {
-        this.demangled += "::" + part.toString();
-      } else {
-        this.demangled += part.toString();
-      }
-    }
-    if (this.demangled.startsWith("::")) {
-      this.demangled = this.demangled.substring(2);
+      this.demangled += part.toString();
     }
 
     return this;
@@ -129,16 +132,16 @@ class Part {
 }
 
 // Length denoted string e.g. 3foo
-class NamePart implements Part {
+class UnscopedNamePart implements Part {
   public static parse(str: string, offset: number = 0): ParseResult {
-    const part = new NamePart(str, offset);
+    const part = new UnscopedNamePart(str, offset);
     if (!part.error) {
       return { value: part, consumed: part.consumed };
     }
     return { value: null, consumed: 0, error: part.error };
   }
-  public static raw(str: string): NamePart {
-    return new NamePart(str, 0, true);
+  public static raw(str: string): UnscopedNamePart {
+    return new UnscopedNamePart(str, 0, true);
   }
 
   private readLength(str: string, offset: number): boolean {
@@ -190,83 +193,117 @@ class NamePart implements Part {
   }
 }
 
-function parseNameParts(
-  str: string,
-  offset: number
-): { consumed: number; parts: NamePart[]; error?: string } {
-  let consumed = 0;
-  let parts: NamePart[] = [];
-  const scoped = str[offset + consumed] === "N";
-  let scopeTerminated = !scoped;
-  if (scoped) {
-    consumed += 1;
+class ScopedNamePart implements Part {
+  public static parse(str: string, offset: number = 0): ParseResult {
+    const part = new ScopedNamePart(str, offset);
+    if (!part.error) {
+      return { value: part, consumed: part.consumed };
+    }
+    return { value: null, consumed: 0, error: part.error };
   }
-  while (offset + consumed < str.length) {
-    if (str[offset + consumed] === "S") {
-      // TODO: Use TemplatePart instead of hardcoded strings?
-      switch (str[offset + consumed + 1]) {
-        case "t":
-          parts.push(NamePart.raw("std"));
-          consumed += 2;
-          continue;
-        case "a":
-          parts.push(NamePart.raw("std"));
-          parts.push(NamePart.raw("allocator"));
-          consumed += 2;
-          continue;
-        case "b":
-          parts.push(NamePart.raw("std"));
-          parts.push(NamePart.raw("basic_string"));
-          consumed += 2;
-          continue;
-        case "s":
-          parts.push(NamePart.raw("std"));
-          parts.push(
-            NamePart.raw(
-              "basic_string<char,std::char_traits<char>,std::allocator<char>>"
-            )
-          );
-          consumed += 2;
-          continue;
-        case "i":
-          parts.push(
-            NamePart.raw("std::basic_istream<char,std::char_traits<char>>")
-          );
-          consumed += 2;
-          continue;
-        case "o":
-          parts.push(
-            NamePart.raw("std::basic_ostream<char,std::char_traits<char>>")
-          );
-          consumed += 2;
-          continue;
-        case "d":
-          parts.push(
-            NamePart.raw("std::basic_iostream<char,std::char_traits<char>>")
-          );
-          consumed += 2;
-        default:
-          break;
+
+  private constructor(str: string, offset: number) {
+    const scopingTerminated = str[offset + this.consumed] !== "N";
+    if (!scopingTerminated) {
+      this.consumed += 1;
+    }
+
+    while (offset + this.consumed < str.length) {
+      if (str[offset + this.consumed] === "S") {
+        // TODO: Use TemplatePart instead of hardcoded strings?
+        switch (str[offset + this.consumed + 1]) {
+          case "t":
+            this.parts.push(UnscopedNamePart.raw("std"));
+            this.consumed += 2;
+            continue;
+          case "a":
+            this.parts.push(UnscopedNamePart.raw("std"));
+            this.parts.push(UnscopedNamePart.raw("allocator"));
+            this.consumed += 2;
+            continue;
+          case "b":
+            this.parts.push(UnscopedNamePart.raw("std"));
+            this.parts.push(UnscopedNamePart.raw("basic_string"));
+            this.consumed += 2;
+            continue;
+          case "s":
+            this.parts.push(UnscopedNamePart.raw("std"));
+            this.parts.push(
+              UnscopedNamePart.raw(
+                "basic_string<char,std::char_traits<char>,std::allocator<char>>"
+              )
+            );
+            this.consumed += 2;
+            continue;
+          case "i":
+            this.parts.push(
+              UnscopedNamePart.raw(
+                "std::basic_istream<char,std::char_traits<char>>"
+              )
+            );
+            this.consumed += 2;
+            continue;
+          case "o":
+            this.parts.push(
+              UnscopedNamePart.raw(
+                "std::basic_ostream<char,std::char_traits<char>>"
+              )
+            );
+            this.consumed += 2;
+            continue;
+          case "d":
+            this.parts.push(
+              UnscopedNamePart.raw(
+                "std::basic_iostream<char,std::char_traits<char>>"
+              )
+            );
+            this.consumed += 2;
+          default:
+            break;
+        }
       }
-    }
-    const part = NamePart.parse(str, offset + consumed);
-    if (part.error) {
-      return { consumed: 0, parts: [], error: part.error };
-    }
-    if (part.consumed === 0) {
-      if (scoped && str[offset + consumed] === "E") {
-        scopeTerminated = true;
-        consumed += 1;
+      const part = UnscopedNamePart.parse(str, offset + this.consumed);
+      if (part.error) {
+        this.error = part.error;
+        return;
       }
-      break;
+      if (part.consumed === 0) {
+        if (scopingTerminated && str[offset + this.consumed] === "E") {
+          // std:: isn't scoped using N...E
+          this.error = "ScopedNamePart: Tried to terminate implicit scoping";
+          return;
+        }
+        break;
+      }
+      this.parts.push(part.value);
+      this.consumed += part.consumed;
     }
-    parts.push(part.value);
-    consumed += part.consumed;
+
+    if (!scopingTerminated) {
+      if (str[offset + this.consumed] !== "E") {
+        this.error = "ScopedNamePart: Scoping not terminated";
+        return;
+      }
+      this.consumed += 1;
+    }
+
+    if (this.parts.length === 0) {
+      this.error = "ScopedNamePart: No parts";
+      return;
+    }
   }
-  if (!scopeTerminated) {
-    return { consumed: 0, parts: [], error: "NamePart: Unterminated scope" };
+
+  private consumed: number = 0;
+  private error: string = "";
+  private parts: UnscopedNamePart[] = [];
+
+  public toString(): string {
+    if (this.parts.length === 1) {
+      return this.parts[0].toString();
+    } else {
+      return this.parts.map((p) => p.toString()).join("::");
+    }
   }
-  return { consumed, parts };
 }
 
 // https://itanium-cxx-abi.github.io/cxx-abi/abi-mangling.html

@@ -20,18 +20,19 @@ describe("presence of name mangling can be detected", () => {
 
 describe("parse variables", () => {
   test("simple variables", () => {
-    expect(demangle("bar")).toBe("bar");
-    expect(demangle("_Z3bar")).toBe("bar");
+    expect(demangleWithError("bar")).toBe("bar");
+    expect(demangleWithError("_Z3bar")).toBe("bar");
     expect(demangle("_Z4foo")).toBe("_Z4foo");
   });
   test("variables with modifiers", () => {
-    expect(demangle("_ZL3bar")).toBe("bar");
+    expect(demangleWithError("_ZL3bar")).toBe("bar");
   });
   test("variables with namespaces", () => {
-    expect(demangle("_ZN1a3barE")).toBe("a::bar");
-    expect(demangle("_ZSt3bar")).toBe("std::bar");
-    expect(demangle("_ZN4foo14bar2E")).toBe("foo1::bar2");
+    expect(demangleWithError("_ZN1a3barE")).toBe("a::bar");
+    expect(demangleWithError("_ZSt3bar")).toBe("std::bar");
+    expect(demangleWithError("_ZN4foo14bar2E")).toBe("foo1::bar2");
     expect(demangle("_ZN4foo14bar2")).toBe("_ZN4foo14bar2");
+    expect(demangle("_ZSt3barE")).toBe("_ZSt3barE");
   });
   test("vendor string", () => {
     expect(new MangledSymbol("_Z3foo.bar").demangle().getVendorSuffix()).toBe(
