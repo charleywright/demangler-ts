@@ -16,12 +16,12 @@ export class MangledSymbol {
   private demangled: string = "";
   private error: string = "";
   private parts: Part[] = [];
+  private vendorSuffix: string = "";
   /*
     Function arguments come after closing E in namespaced
     Otherwise they are directly after first name part
     which can be a template: _Z4funcIiEvT_ func<int>(int)
   */
-  private isNamespaced: boolean = false;
 
   public demangle(): MangledSymbol {
     let offset = 0;
@@ -37,15 +37,16 @@ export class MangledSymbol {
       if (this.mangled[offset] === "L") {
         offset += 1;
         continue;
-      } else if (this.mangled[offset] === "N") {
-        this.isNamespaced = true;
-        offset += 1;
       } else {
         break;
       }
     }
 
     const nameParts = parseNameParts(this.mangled, offset);
+    if (nameParts.error) {
+      this.error = nameParts.error;
+      return this;
+    }
     this.parts.push(...nameParts.parts);
     offset += nameParts.consumed;
 
@@ -54,8 +55,25 @@ export class MangledSymbol {
       return this;
     }
 
-    if (this.isNamespaced && this.mangled[offset] !== "E") {
-      this.error = "Missing namespace close";
+    if (offset < this.mangled.length) {
+      const functionPart = FunctionPart.parse(this.mangled, offset);
+      if (functionPart.error) {
+        this.error = functionPart.error;
+        return this;
+      }
+      if (functionPart.consumed > 0) {
+        this.parts.push(functionPart.value);
+        offset += functionPart.consumed;
+      }
+    }
+
+    if (this.mangled[offset] === ".") {
+      this.vendorSuffix = this.mangled.substring(offset + 1);
+      offset = this.mangled.length;
+    }
+
+    if (offset != this.mangled.length) {
+      this.error = `Incomplete parse: '${this.mangled.substring(offset)}'`;
       return this;
     }
 
@@ -76,6 +94,10 @@ export class MangledSymbol {
 
   public getError(): string {
     return this.error;
+  }
+
+  public getVendorSuffix(): string {
+    return this.vendorSuffix;
   }
 
   public toString(): string {
@@ -171,9 +193,14 @@ class NamePart implements Part {
 function parseNameParts(
   str: string,
   offset: number
-): { consumed: number; parts: NamePart[] } {
+): { consumed: number; parts: NamePart[]; error?: string } {
   let consumed = 0;
   let parts: NamePart[] = [];
+  const scoped = str[offset + consumed] === "N";
+  let scopeTerminated = !scoped;
+  if (scoped) {
+    consumed += 1;
+  }
   while (offset + consumed < str.length) {
     if (str[offset + consumed] === "S") {
       // TODO: Use TemplatePart instead of hardcoded strings?
@@ -223,11 +250,124 @@ function parseNameParts(
       }
     }
     const part = NamePart.parse(str, offset + consumed);
-    if (part.error || part.consumed === 0) {
+    if (part.error) {
+      return { consumed: 0, parts: [], error: part.error };
+    }
+    if (part.consumed === 0) {
+      if (scoped && str[offset + consumed] === "E") {
+        scopeTerminated = true;
+        consumed += 1;
+      }
       break;
     }
     parts.push(part.value);
     consumed += part.consumed;
   }
+  if (!scopeTerminated) {
+    return { consumed: 0, parts: [], error: "NamePart: Unterminated scope" };
+  }
   return { consumed, parts };
+}
+
+// https://itanium-cxx-abi.github.io/cxx-abi/abi-mangling.html
+enum Type {
+  Void = "void", // v
+  Bool = "bool", // b
+  Char = "char", // c
+  SChar = "signed char", // a
+  UChar = "unsigned char", // h
+  WChar = "wchar_t", // w
+  Short = "short", // s
+  UShort = "unsigned short", // t
+  Int = "int", // i
+  UInt = "unsigned int", // j
+  Long = "long", // l
+  ULong = "unsigned long", // m
+  LongLong = "long long", // x
+  ULongLong = "unsigned long long", // y
+  Int128 = "__int128", // n
+  UInt128 = "unsigned __int128", // o
+  Float = "float", // f
+  Double = "double", // d
+  LongDouble = "long double", // e
+  Float128 = "__float128", // g
+  Pointer = "*", // P
+  Reference = "&", // R
+  RValueReference = "&&", // O
+
+  Member = "member", // TODO: Not sure when this is used, id is "M"
+  Imaginary = "imaginary", // TODO: Research "imaginary type qualifier (C 2000)". id is "G"
+  Complex = "complex", // TODO: Research "complex type qualifier (C 2000)". id is "H"
+  Restrict = "restrict", // TODO: Research "restrict qualifier (C 2000)". id is "r"
+  VendorExtendedType = "vendor-extended-type", // TODO: Research "vendor extended builtin type". id is "u"
+  VendorExtendedQualifier = "vendor-extended-qualifier", // TODO: Research "vendor extended type qualifier". id is "U"
+  ExternC = "extern-c", // TODO: When is this used in name mangling? id is "Y"
+
+  Array = "array", // A
+  Ellipsis = "...", // z
+  PackExpansion = "...T", // Dp
+  Decltype2 = "decltype2", // Dt
+  Decltype = "decltype", // DT
+
+  ERROR = "error",
+  RAW = "raw",
+}
+const TypeMapping: { [k: string]: Type } = {
+  v: Type.Void,
+  b: Type.Bool,
+  c: Type.Char,
+  a: Type.SChar,
+  h: Type.UChar,
+  w: Type.WChar,
+  s: Type.Short,
+  t: Type.UShort,
+  i: Type.Int,
+  j: Type.UInt,
+  l: Type.Long,
+  m: Type.ULong,
+  x: Type.LongLong,
+  y: Type.ULongLong,
+  n: Type.Int128,
+  o: Type.UInt128,
+  f: Type.Float,
+  d: Type.Double,
+  e: Type.LongDouble,
+  g: Type.Float128,
+  P: Type.Pointer,
+  R: Type.Reference,
+  O: Type.RValueReference,
+
+  M: Type.Member,
+  G: Type.Imaginary,
+  H: Type.Complex,
+  u: Type.VendorExtendedType,
+  U: Type.VendorExtendedQualifier,
+  Y: Type.ExternC,
+
+  A: Type.Array,
+  z: Type.Ellipsis,
+  Dp: Type.PackExpansion,
+  Dt: Type.Decltype2,
+  DT: Type.Decltype,
+};
+
+// Function arguments
+class FunctionPart implements Part {
+  public static parse(str: string, offset: number): ParseResult {
+    const part = new FunctionPart(str, offset);
+    if (!part.error) {
+      return { value: part, consumed: part.consumed };
+    }
+    return { value: part, consumed: 0, error: part.error };
+  }
+
+  private constructor(str: string, offset: number) {}
+
+  private consumed: number = 0;
+  private error: string = "";
+  private str: string = "";
+
+  public toString(): string {
+    return this.str;
+  }
 }
