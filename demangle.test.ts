@@ -25,7 +25,8 @@ describe("parse variables", () => {
     expect(demangle("_Z4foo")).toBe("_Z4foo");
   });
   test("variables with modifiers", () => {
-    expect(demangleWithError("_ZL3bar")).toBe("bar");
+    expect(demangleWithError("_ZL3bar")).toBe("bar const");
+    expect(demangleWithError("_ZN3fooL3barE")).toBe("foo::bar const");
   });
   test("variables with namespaces", () => {
     expect(demangleWithError("_ZN1a3barE")).toBe("a::bar");
@@ -47,21 +48,25 @@ describe("parse variables", () => {
 describe("parse functions", () => {
   test("simple functions", () => {
     expect(demangleWithError("_Z3foov")).toBe("foo(void)");
-    //     expect(demangleWithError("_Z3foobcahwstijlmxynofdeg")).toBe(
-    //       "foo(bool, char, signed char, unsigned char, wchar_t, short, unsigned short, int, unsigned int, long, unsigned long, long long, unsigned long long, __int128, unsigned __int128, float, double, long double, __float128)"
-    //     );
-    //     expect(demangleWithError("_Z3fooB")).toBe("_Z3fooB");
-    //     expect(demangleWithError("_Z3foo3bar")).toBe("foo(bar)");
-    //     expect(demangleWithError("_Z3foo4bar")).toBe("_Z3foo4bar");
-    //     expect(demangleWithError("_ZLN4foo14bar2E3baz")).toBe("foo1::bar2(baz)");
-    //     expect(demangleWithError("_ZNK4foo14bar2E3baz")).toBe("foo1::bar2(baz) const");
-    //     expect(demangleWithError("_ZLN4foo14bar2EN3baz3quxE")).toBe("foo1::bar2(baz::qux)");
-    //     expect(demangleWithError("_Z3fooiB")).toBe("_Z3fooiB");
-    //     expect(demangleWithError("_ZK3fooi")).toBe("foo(int) const");
-    //     expect(demangleWithError("_ZN1a1S3fooEv")).toBe("a::S::foo(void)");
-    //     expect(demangleWithError("_ZNK1a1S9const_fooEv")).toBe(
-    //       "a::S::const_foo(void) const"
-    //     );
+    expect(demangleWithError("_Z3foobcahwstijlmxynofdeg")).toBe(
+      "foo(bool, char, signed char, unsigned char, wchar_t, short, unsigned short, int, unsigned int, long, unsigned long, long long, unsigned long long, __int128, unsigned __int128, float, double, long double, __float128)"
+    );
+    expect(demangle("_Z3fooB")).toBe("_Z3fooB");
+    expect(demangleWithError("_Z3foo3bar")).toBe("foo(bar)");
+    expect(demangle("_Z3foo4bar")).toBe("_Z3foo4bar");
+    expect(demangleWithError("_ZLN4foo14bar2E3baz")).toBe("foo1::bar2(baz)");
+    expect(demangleWithError("_ZNK4foo14bar2E3baz")).toBe(
+      "foo1::bar2(baz) const"
+    );
+    expect(demangleWithError("_ZLN4foo14bar2EN3baz3quxE")).toBe(
+      "foo1::bar2(baz::qux)"
+    );
+    expect(demangleWithError("_Z3fooiB")).toBe("_Z3fooiB");
+    expect(demangleWithError("_ZK3fooi")).toBe("foo(int) const");
+    expect(demangleWithError("_ZN1a1S3fooEv")).toBe("a::S::foo(void)");
+    expect(demangleWithError("_ZNK1a1S9const_fooEv")).toBe(
+      "a::S::const_foo(void) const"
+    );
   });
   //   test("arguments with qualifiers", () => {
   //     expect(demangleWithError("_Z3fooP3bar")).toBe("foo(bar*)");

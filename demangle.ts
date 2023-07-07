@@ -33,32 +33,13 @@ export class MangledSymbol {
       return this;
     }
 
-    while (offset < this.mangled.length) {
-      if (this.mangled[offset] === "L") {
-        offset += 1;
-        continue;
-      } else {
-        break;
-      }
+    const namePart = parseNamePart(this.mangled, offset);
+    if (namePart.error) {
+      this.error = namePart.error;
+      return this;
     }
-
-    if (this.mangled[offset] === "N" || this.mangled[offset] === "S") {
-      const scopedNamePart = ScopedNamePart.parse(this.mangled, offset);
-      if (scopedNamePart.error) {
-        this.error = scopedNamePart.error;
-        return this;
-      }
-      this.parts.push(scopedNamePart.value);
-      offset += scopedNamePart.consumed;
-    } else {
-      const namePart = UnscopedNamePart.parse(this.mangled, offset);
-      if (namePart.error) {
-        this.error = namePart.error;
-        return this;
-      }
-      this.parts.push(namePart.value);
-      offset += namePart.consumed;
-    }
+    this.parts.push(namePart.value);
+    offset += namePart.consumed;
 
     if (this.parts.length === 0) {
       this.error = "No name parts";
@@ -168,7 +149,12 @@ class UnscopedNamePart implements Part {
       return;
     }
 
-    if (!this.readLength(str, offset)) {
+    if (str[offset + this.consumed] === "L") {
+      this.isConst = true;
+      this.consumed += 1;
+    }
+
+    if (!this.readLength(str, offset + this.consumed)) {
       return;
     }
     if (
@@ -187,9 +173,14 @@ class UnscopedNamePart implements Part {
   private error: string = "";
   private length: number = 0;
   private str: string = "";
+  private isConst: boolean = false;
 
   public toString(): string {
-    return this.str;
+    let str = this.str;
+    if (this.isConst) {
+      str += " const";
+    }
+    return str;
   }
 }
 
@@ -205,6 +196,11 @@ class ScopedNamePart implements Part {
   private constructor(str: string, offset: number) {
     const scopingTerminated = str[offset + this.consumed] !== "N";
     if (!scopingTerminated) {
+      this.consumed += 1;
+    }
+
+    if (str[offset + this.consumed] === "K") {
+      this.isConst = true;
       this.consumed += 1;
     }
 
@@ -296,13 +292,27 @@ class ScopedNamePart implements Part {
   private consumed: number = 0;
   private error: string = "";
   private parts: UnscopedNamePart[] = [];
+  private isConst: boolean = false;
 
   public toString(): string {
+    let str;
     if (this.parts.length === 1) {
-      return this.parts[0].toString();
+      str = this.parts[0].toString();
     } else {
-      return this.parts.map((p) => p.toString()).join("::");
+      str = this.parts.map((p) => p.toString()).join("::");
     }
+    if (this.isConst) {
+      str += " const";
+    }
+    return str;
+  }
+}
+
+function parseNamePart(str: string, offset: number): ParseResult {
+  if (str[offset] === "N" || str[offset] === "S") {
+    return ScopedNamePart.parse(str, offset);
+  } else {
+    return UnscopedNamePart.parse(str, offset);
   }
 }
 
@@ -328,23 +338,24 @@ enum Type {
   Double = "double", // d
   LongDouble = "long double", // e
   Float128 = "__float128", // g
-  Pointer = "*", // P
-  Reference = "&", // R
-  RValueReference = "&&", // O
 
-  Member = "member", // TODO: Not sure when this is used, id is "M"
-  Imaginary = "imaginary", // TODO: Research "imaginary type qualifier (C 2000)". id is "G"
-  Complex = "complex", // TODO: Research "complex type qualifier (C 2000)". id is "H"
-  Restrict = "restrict", // TODO: Research "restrict qualifier (C 2000)". id is "r"
-  VendorExtendedType = "vendor-extended-type", // TODO: Research "vendor extended builtin type". id is "u"
-  VendorExtendedQualifier = "vendor-extended-qualifier", // TODO: Research "vendor extended type qualifier". id is "U"
-  ExternC = "extern-c", // TODO: When is this used in name mangling? id is "Y"
+  Member = "member", // M
+  Imaginary = "imaginary", // G
+  Complex = "complex", // H
+  Restrict = "restrict", // r
+  VendorExtendedType = "vendor-extended-type", // u
+  VendorExtendedQualifier = "vendor-extended-qualifier", // U
+  ExternC = "extern-c", // Y
 
   Array = "array", // A
   Ellipsis = "...", // z
   PackExpansion = "...T", // Dp
   Decltype2 = "decltype2", // Dt
   Decltype = "decltype", // DT
+
+  Pointer = "*", // P
+  Reference = "&", // R
+  RValueReference = "&&", // O
 
   ERROR = "error",
   RAW = "raw",
@@ -370,10 +381,8 @@ const TypeMapping: { [k: string]: Type } = {
   d: Type.Double,
   e: Type.LongDouble,
   g: Type.Float128,
-  P: Type.Pointer,
-  R: Type.Reference,
-  O: Type.RValueReference,
 
+  // TODO: Anything below needs looking into properly
   M: Type.Member,
   G: Type.Imaginary,
   H: Type.Complex,
@@ -387,6 +396,148 @@ const TypeMapping: { [k: string]: Type } = {
   Dt: Type.Decltype2,
   DT: Type.Decltype,
 };
+const TypeMappingKeys = Object.keys(TypeMapping);
+function offsetStringComp(
+  left: string,
+  leftOffset: number,
+  right: string
+): boolean {
+  for (let i = 0; i < right.length; i++) {
+    if (left[leftOffset + i] != right[i]) {
+      return false;
+    }
+  }
+  return true;
+}
+
+/*
+_Z6myfuncN2ns1sE      void myfunc(ns::s a)
+_Z6myfuncPKN2ns1sE    void myfunc(ns::s const *a)
+_Z6myfuncPN2ns1sE     void myfunc(ns::s *const a)
+_Z6myfuncPKN2ns1sE    void myfunc(ns::s const *const a)
+_Z6myfuncRN2ns1sE     void myfunc(ns::s &a)
+_Z6myfuncRKN2ns1sE    void myfunc(ns::s const &a)
+_Z6myfuncRPN2ns1sE    void myfunc(ns::s *&a)
+_Z6myfuncPN2ns1sE     void myfunc(ns::s *volatile a)
+_Z6myfuncPVN2ns1sE    void myfunc(ns::s volatile *a)
+*/
+
+enum RefQualifier {
+  None,
+  Pointer = "*",
+  Reference = "&",
+  RValueReference = "&&",
+}
+
+class QualifiedType implements Part {
+  public static parse(str: string, offset: number): ParseResult {
+    const type = new QualifiedType(str, offset);
+    if (type.error) {
+      return { value: null, consumed: 0, error: type.error };
+    }
+    if (type.type === Type.ERROR) {
+      return { value: null, consumed: 0 };
+    }
+    return { value: type, consumed: type.consumed };
+  }
+
+  private constructor(str: string, offset: number) {
+    if (str[offset + this.consumed] === "K") {
+      this.isConst = true;
+      this.consumed += 1;
+    }
+    if (str[offset + this.consumed] === "V") {
+      this.isVolatile = true;
+      this.consumed += 1;
+    }
+
+    if (str[offset + this.consumed] === "P") {
+      this.type = Type.Pointer;
+      this.refQualifier = RefQualifier.Pointer;
+      this.consumed += 1;
+    } else if (str[offset + this.consumed] === "R") {
+      this.type = Type.Reference;
+      this.refQualifier = RefQualifier.Reference;
+      this.consumed += 1;
+    } else if (str[offset + this.consumed] === "O") {
+      this.type = Type.RValueReference;
+      this.refQualifier = RefQualifier.RValueReference;
+      this.consumed += 1;
+    }
+    if (this.refQualifier != RefQualifier.None) {
+      this.ref = new QualifiedType(str, offset + this.consumed);
+      if (this.ref.error) {
+        this.error = this.ref.error;
+        return;
+      }
+      if (this.ref.consumed === 0) {
+        this.consumed = 0;
+        this.error = "QualifiedType: Failed to find type reference is for";
+        return;
+      }
+      this.consumed += this.ref.consumed;
+      return;
+    } else {
+      for (const key of TypeMappingKeys) {
+        if (offsetStringComp(str, offset + this.consumed, key)) {
+          this.type = TypeMapping[key];
+          this.consumed += key.length;
+          return;
+        }
+      }
+
+      const rawName = parseNamePart(str, offset + this.consumed);
+      if (rawName.error) {
+        this.error = rawName.error;
+        return;
+      }
+      if (rawName.consumed === 0) {
+        this.consumed = 0;
+        const ALLOWLIST = ["."];
+        if (ALLOWLIST.includes(str[offset + this.consumed])) {
+          return;
+        }
+        this.error = `QualifiedType: Couldn't parse type '${str.substring(
+          offset
+        )}'`;
+        return;
+      }
+      this.type = Type.RAW;
+      this.rawType = rawName.value.toString();
+      this.consumed += rawName.consumed;
+    }
+  }
+
+  private consumed: number = 0;
+  private error: string = "";
+  private type: Type = Type.ERROR;
+  private rawType: string = "";
+
+  private isConst: boolean = false;
+  private isVolatile: boolean = false;
+
+  private refQualifier: RefQualifier = RefQualifier.None;
+  private ref: QualifiedType | null = null;
+
+  public toString(): string {
+    let str = this.type === Type.RAW ? this.rawType : this.type;
+
+    if (this.refQualifier !== RefQualifier.None && this.ref !== null) {
+      str = this.ref.toString();
+      str += this.refQualifier;
+    }
+
+    if (this.isConst) {
+      str += " const";
+    }
+
+    if (this.isVolatile) {
+      str += " volatile";
+    }
+
+    return str;
+  }
+}
 
 // Function arguments
 class FunctionPart implements Part {
@@ -398,13 +549,26 @@ class FunctionPart implements Part {
     return { value: part, consumed: 0, error: part.error };
   }
 
-  private constructor(str: string, offset: number) {}
+  private constructor(str: string, offset: number) {
+    while (offset + this.consumed < str.length) {
+      const param = QualifiedType.parse(str, offset + this.consumed);
+      if (param.error) {
+        this.error = param.error;
+        return;
+      }
+      if (param.consumed === 0) {
+        break;
+      }
+      this.parameters.push(param.value);
+      this.consumed += param.consumed;
+    }
+  }
 
   private consumed: number = 0;
   private error: string = "";
-  private str: string = "";
+  private parameters: Part[] = [];
 
   public toString(): string {
-    return this.str;
+    return "(" + this.parameters.map((p) => p.toString()).join(", ") + ")";
   }
 }
