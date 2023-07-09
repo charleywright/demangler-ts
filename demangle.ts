@@ -15,7 +15,8 @@ export class MangledSymbol {
   private mangled: string = "";
   private demangled: string = "";
   private error: string = "";
-  private parts: Part[] = [];
+  private name: UnscopedNamePart | ScopedNamePart | null = null;
+  private func: FunctionPart | null = null;
   private vendorSuffix: string = "";
   /*
     Function arguments come after closing E in namespaced
@@ -38,10 +39,15 @@ export class MangledSymbol {
       this.error = namePart.error;
       return this;
     }
-    this.parts.push(namePart.value);
+    if (namePart.consumed === 0) {
+      this.error = "Failed to read name";
+      return this;
+    }
+    this.name = namePart.value;
     offset += namePart.consumed;
 
-    if (this.parts.length === 0) {
+    // CodeCoverage: namePart.error would've been set, therefore this is always false
+    if (this.name === null) {
       this.error = "No name parts";
       return this;
     }
@@ -53,7 +59,7 @@ export class MangledSymbol {
         return this;
       }
       if (functionPart.consumed > 0) {
-        this.parts.push(functionPart.value);
+        this.func = functionPart.value;
         offset += functionPart.consumed;
       }
     }
@@ -63,14 +69,21 @@ export class MangledSymbol {
       offset = this.mangled.length;
     }
 
+    // CodeCoverage: An error should always be detected, but just in case check anyway
     if (offset != this.mangled.length) {
       this.error = `Incomplete parse: '${this.mangled.substring(offset)}'`;
       return this;
     }
 
-    this.demangled = "";
-    for (const part of this.parts) {
-      this.demangled += part.toString();
+    this.demangled = this.name.toString();
+    if (this.func !== null) {
+      if (this.demangled.endsWith(" const")) {
+        this.demangled = this.demangled.substring(0, this.demangled.length - 6);
+        this.demangled += this.func.toString();
+        this.demangled += " const";
+      } else {
+        this.demangled += this.func.toString();
+      }
     }
 
     return this;
@@ -100,12 +113,20 @@ interface ReadResult<Type> {
   consumed: number;
 }
 
+enum PartTypes {
+  Part = "part", // Base
+  UnscopedName = "unscoped-name", // A name, e.g "std" or "myfunc"
+  ScopedName = "scoped-name", // A collection of unscoped names representing scope
+  QualifiedType = "qualified-type", // A type in a template or parameter
+  Function = "function", // A collection of types representing parameters
+}
 class Part {
   public static parse(str: string, offset: number = 0): ParseResult {
     return { value: null, consumed: 0, error: "Base class cannot parse" };
   }
 
   private constructor(str: string, offset: number) {}
+  public type: PartTypes = PartTypes.Part;
 
   public toString(): string {
     return "part";
@@ -154,7 +175,9 @@ class UnscopedNamePart implements Part {
       this.consumed += 1;
     }
 
-    if (!this.readLength(str, offset + this.consumed)) {
+    if (!this.readLength(str, offset)) {
+      this.consumed = 0;
+      this.isConst = false;
       return;
     }
     if (
@@ -169,6 +192,7 @@ class UnscopedNamePart implements Part {
     this.consumed += this.str.length;
   }
 
+  public type: PartTypes = PartTypes.UnscopedName;
   private consumed: number = 0;
   private error: string = "";
   private length: number = 0;
@@ -199,9 +223,28 @@ class ScopedNamePart implements Part {
       this.consumed += 1;
     }
 
-    if (str[offset + this.consumed] === "K") {
-      this.isConst = true;
-      this.consumed += 1;
+    while (offset + this.consumed < str.length) {
+      if (str[offset + this.consumed] === "K") {
+        if (scopingTerminated) {
+          this.error =
+            "ScopedNamePart: Const not allowed for non-terminated scoped names";
+          return;
+        }
+        this.isConst = true;
+        this.consumed += 1;
+        continue;
+      }
+      if (str[offset + this.consumed] === "L") {
+        if (scopingTerminated) {
+          this.error =
+            "ScopedNamePart: Const not allowed for non-terminated scoped names";
+          return;
+        }
+        // this.isConst = true; // c++filt doesn't count this as const
+        this.consumed += 1;
+        continue;
+      }
+      break;
     }
 
     while (offset + this.consumed < str.length) {
@@ -289,6 +332,7 @@ class ScopedNamePart implements Part {
     }
   }
 
+  public type: PartTypes = PartTypes.ScopedName;
   private consumed: number = 0;
   private error: string = "";
   private parts: UnscopedNamePart[] = [];
@@ -435,7 +479,7 @@ class QualifiedType implements Part {
     if (type.error) {
       return { value: null, consumed: 0, error: type.error };
     }
-    if (type.type === Type.ERROR) {
+    if (type.t === Type.ERROR) {
       return { value: null, consumed: 0 };
     }
     return { value: type, consumed: type.consumed };
@@ -452,15 +496,15 @@ class QualifiedType implements Part {
     }
 
     if (str[offset + this.consumed] === "P") {
-      this.type = Type.Pointer;
+      this.t = Type.Pointer;
       this.refQualifier = RefQualifier.Pointer;
       this.consumed += 1;
     } else if (str[offset + this.consumed] === "R") {
-      this.type = Type.Reference;
+      this.t = Type.Reference;
       this.refQualifier = RefQualifier.Reference;
       this.consumed += 1;
     } else if (str[offset + this.consumed] === "O") {
-      this.type = Type.RValueReference;
+      this.t = Type.RValueReference;
       this.refQualifier = RefQualifier.RValueReference;
       this.consumed += 1;
     }
@@ -475,12 +519,49 @@ class QualifiedType implements Part {
         this.error = "QualifiedType: Failed to find type reference is for";
         return;
       }
+
+      if (
+        this.t === Type.Pointer &&
+        (this.ref.t === Type.Reference || this.ref.t === Type.RValueReference)
+      ) {
+        /* gcc (GCC) 13.1.1 20230429
+          echo -e "void foo(int &&*a) {}" | gcc -x c++ -S - -o-
+          error: cannot declare pointer to ‘int&&’
+          
+          echo -e "void foo(int &*a) {}" | gcc -x c++ -S - -o-
+          error: cannot declare pointer to ‘int&’
+        */
+        this.consumed = 0;
+        this.error = "QualifiedType: C++ forbids pointer to reference";
+        return;
+      }
+      if (
+        (this.t === Type.Reference || this.t === Type.RValueReference) &&
+        (this.ref.t === Type.Reference || this.ref.t === Type.RValueReference)
+      ) {
+        /* gcc (GCC) 13.1.1 20230429
+          echo -e "void foo(int & &a) {}" | gcc -x c++ -S - -o-
+          error: cannot declare reference to ‘int&’, which is not a typedef or a template type argument
+
+          echo -e "void foo(int && &a) {}" | gcc -x c++ -S - -o-
+          error: cannot declare reference to ‘int&&’, which is not a typedef or a template type argument
+
+          echo -e "void foo(int & &&a) {}" | gcc -x c++ -S - -o-
+          error: cannot declare reference to ‘int&’, which is not a typedef or a template type argument
+
+          echo -e "void foo(int && &&a) {}" | gcc -x c++ -S - -o-
+          error: cannot declare reference to ‘int&&’, which is not a typedef or a template type argument
+        */
+        this.consumed = 0;
+        this.error = "QualifiedType: C++ forbids reference to reference";
+        return;
+      }
       this.consumed += this.ref.consumed;
       return;
     } else {
       for (const key of TypeMappingKeys) {
         if (offsetStringComp(str, offset + this.consumed, key)) {
-          this.type = TypeMapping[key];
+          this.t = TypeMapping[key];
           this.consumed += key.length;
           return;
         }
@@ -502,15 +583,16 @@ class QualifiedType implements Part {
         )}'`;
         return;
       }
-      this.type = Type.RAW;
+      this.t = Type.RAW;
       this.rawType = rawName.value.toString();
       this.consumed += rawName.consumed;
     }
   }
 
+  public type: PartTypes = PartTypes.QualifiedType;
   private consumed: number = 0;
   private error: string = "";
-  private type: Type = Type.ERROR;
+  private t: Type = Type.ERROR;
   private rawType: string = "";
 
   private isConst: boolean = false;
@@ -520,19 +602,19 @@ class QualifiedType implements Part {
   private ref: QualifiedType | null = null;
 
   public toString(): string {
-    let str = this.type === Type.RAW ? this.rawType : this.type;
+    let str = this.t === Type.RAW ? this.rawType : this.t;
 
     if (this.refQualifier !== RefQualifier.None && this.ref !== null) {
       str = this.ref.toString();
       str += this.refQualifier;
     }
 
-    if (this.isConst) {
-      str += " const";
-    }
-
     if (this.isVolatile) {
       str += " volatile";
+    }
+
+    if (this.isConst) {
+      str += " const";
     }
 
     return str;
@@ -550,6 +632,10 @@ class FunctionPart implements Part {
   }
 
   private constructor(str: string, offset: number) {
+    if (str.length - offset === 0) {
+      this.error = "Function: No arguments";
+      return;
+    }
     while (offset + this.consumed < str.length) {
       const param = QualifiedType.parse(str, offset + this.consumed);
       if (param.error) {
@@ -564,6 +650,7 @@ class FunctionPart implements Part {
     }
   }
 
+  public type: PartTypes = PartTypes.Function;
   private consumed: number = 0;
   private error: string = "";
   private parameters: Part[] = [];
