@@ -71,6 +71,10 @@ describe("parse functions", () => {
     expect(demangleWithError("_ZNK1a1S9const_fooEv")).toBe(
       "a::S::const_foo(void) const"
     );
+
+    // TODO: Find fixes for these
+    // expect(demangle("_ZStK3foo3bar")).toBe("_ZStK3foo3bar"); // std(foo const, bar)
+    // expect(demangleWithError("_ZSsL3foo3bar")).toBe("std::basic_string<char,std::char_traits<char>,std::allocator<char>>(foo, bar)"); // std::basic_string<char,std::char_traits<char>,std::allocator<char>>::foo const::bar
   });
   test("arguments with qualifiers", () => {
     expect(demangleWithError("_Z3fooP3bar")).toBe("foo(bar*)");
@@ -103,6 +107,23 @@ describe("parse functions", () => {
     expect(demangleWithError("_Z3fooKPKN3bar3bazE")).toBe(
       "foo(bar::baz const* const)"
     );
+    expect(
+      demangleWithError(
+        "_ZNKSt6__ndk119__shared_weak_count13__get_deleterERKSt9type_info"
+      )
+    ).toBe(
+      "std::__ndk1::__shared_weak_count::__get_deleter(std::type_info const&) const"
+    );
+    expect(
+      demangleWithError(
+        "_ZN13mediaplatform11HTTPMessage16removeHTTPHeaderERKSs"
+      )
+    ).toBe(
+      "mediaplatform::HTTPMessage::removeHTTPHeader(std::basic_string<char,std::char_traits<char>,std::allocator<char>> const&)"
+    );
+    expect(
+      demangleWithError("_ZN13mediaplatform11HTTPMessage7setBodyERKSb")
+    ).toBe("mediaplatform::HTTPMessage::setBody(std::basic_string const&)");
   });
   test("functions with templates", () => {
     //     expect(demangleWithError("_Z3fooIiEvT_")).toBe("void foo<int>(int)");

@@ -108,33 +108,33 @@ interface ParseResult {
   consumed: number;
   error?: string;
 }
-interface ReadResult<Type> {
-  value: Type | null;
-  consumed: number;
-}
 
-enum PartTypes {
+enum PartType {
   Part = "part", // Base
   UnscopedName = "unscoped-name", // A name, e.g "std" or "myfunc"
   ScopedName = "scoped-name", // A collection of unscoped names representing scope
   QualifiedType = "qualified-type", // A type in a template or parameter
   Function = "function", // A collection of types representing parameters
 }
-class Part {
-  public static parse(str: string, offset: number = 0): ParseResult {
-    return { value: null, consumed: 0, error: "Base class cannot parse" };
+abstract class Part {
+  constructor(type: PartType) {
+    this.type = type;
   }
+  public type: PartType;
+  protected consumed: number = 0;
+  protected error: string = "";
 
-  private constructor(str: string, offset: number) {}
-  public type: PartTypes = PartTypes.Part;
-
-  public toString(): string {
-    return "part";
-  }
+  public abstract toString(): string;
 }
 
+// https://stackoverflow.com/a/65847601/12282075
+interface PartConstructor {
+  parse(str: string, offset: number): ParseResult;
+}
+function checkPartCtor(clazz: PartConstructor) {}
+
 // Length denoted string e.g. 3foo
-class UnscopedNamePart implements Part {
+class UnscopedNamePart extends Part {
   public static parse(str: string, offset: number = 0): ParseResult {
     const part = new UnscopedNamePart(str, offset);
     if (!part.error) {
@@ -160,12 +160,10 @@ class UnscopedNamePart implements Part {
   }
 
   private constructor(str: string, offset: number, raw: boolean = false) {
+    super(PartType.UnscopedName);
+
     if (raw) {
-      if (offset) {
-        this.str = str.substring(offset);
-      } else {
-        this.str = str;
-      }
+      this.str = str.substring(offset);
       this.length = this.str.length;
       return;
     }
@@ -192,9 +190,6 @@ class UnscopedNamePart implements Part {
     this.consumed += this.str.length;
   }
 
-  public type: PartTypes = PartTypes.UnscopedName;
-  private consumed: number = 0;
-  private error: string = "";
   private length: number = 0;
   private str: string = "";
   private isConst: boolean = false;
@@ -207,8 +202,9 @@ class UnscopedNamePart implements Part {
     return str;
   }
 }
+checkPartCtor(UnscopedNamePart);
 
-class ScopedNamePart implements Part {
+class ScopedNamePart extends Part {
   public static parse(str: string, offset: number = 0): ParseResult {
     const part = new ScopedNamePart(str, offset);
     if (!part.error) {
@@ -218,6 +214,8 @@ class ScopedNamePart implements Part {
   }
 
   private constructor(str: string, offset: number) {
+    super(PartType.ScopedName);
+
     const scopingTerminated = str[offset + this.consumed] !== "N";
     if (!scopingTerminated) {
       this.consumed += 1;
@@ -249,7 +247,6 @@ class ScopedNamePart implements Part {
 
     while (offset + this.consumed < str.length) {
       if (str[offset + this.consumed] === "S") {
-        // TODO: Use TemplatePart instead of hardcoded strings?
         switch (str[offset + this.consumed + 1]) {
           case "t":
             this.parts.push(UnscopedNamePart.raw("std"));
@@ -266,6 +263,7 @@ class ScopedNamePart implements Part {
             this.consumed += 2;
             continue;
           case "s":
+            // TODO: Use TemplatePart instead of hardcoded strings?
             this.parts.push(UnscopedNamePart.raw("std"));
             this.parts.push(
               UnscopedNamePart.raw(
@@ -332,9 +330,6 @@ class ScopedNamePart implements Part {
     }
   }
 
-  public type: PartTypes = PartTypes.ScopedName;
-  private consumed: number = 0;
-  private error: string = "";
   private parts: UnscopedNamePart[] = [];
   private isConst: boolean = false;
 
@@ -351,6 +346,7 @@ class ScopedNamePart implements Part {
     return str;
   }
 }
+checkPartCtor(ScopedNamePart);
 
 function parseNamePart(str: string, offset: number): ParseResult {
   if (str[offset] === "N" || str[offset] === "S") {
@@ -454,18 +450,6 @@ function offsetStringComp(
   return true;
 }
 
-/*
-_Z6myfuncN2ns1sE      void myfunc(ns::s a)
-_Z6myfuncPKN2ns1sE    void myfunc(ns::s const *a)
-_Z6myfuncPN2ns1sE     void myfunc(ns::s *const a)
-_Z6myfuncPKN2ns1sE    void myfunc(ns::s const *const a)
-_Z6myfuncRN2ns1sE     void myfunc(ns::s &a)
-_Z6myfuncRKN2ns1sE    void myfunc(ns::s const &a)
-_Z6myfuncRPN2ns1sE    void myfunc(ns::s *&a)
-_Z6myfuncPN2ns1sE     void myfunc(ns::s *volatile a)
-_Z6myfuncPVN2ns1sE    void myfunc(ns::s volatile *a)
-*/
-
 enum RefQualifier {
   None,
   Pointer = "*",
@@ -473,9 +457,9 @@ enum RefQualifier {
   RValueReference = "&&",
 }
 
-class QualifiedType implements Part {
+class QualifiedTypePart extends Part {
   public static parse(str: string, offset: number): ParseResult {
-    const type = new QualifiedType(str, offset);
+    const type = new QualifiedTypePart(str, offset);
     if (type.error) {
       return { value: null, consumed: 0, error: type.error };
     }
@@ -486,6 +470,8 @@ class QualifiedType implements Part {
   }
 
   private constructor(str: string, offset: number) {
+    super(PartType.QualifiedType);
+
     if (str[offset + this.consumed] === "K") {
       this.isConst = true;
       this.consumed += 1;
@@ -509,7 +495,7 @@ class QualifiedType implements Part {
       this.consumed += 1;
     }
     if (this.refQualifier != RefQualifier.None) {
-      this.ref = new QualifiedType(str, offset + this.consumed);
+      this.ref = new QualifiedTypePart(str, offset + this.consumed);
       if (this.ref.error) {
         this.error = this.ref.error;
         return;
@@ -589,9 +575,6 @@ class QualifiedType implements Part {
     }
   }
 
-  public type: PartTypes = PartTypes.QualifiedType;
-  private consumed: number = 0;
-  private error: string = "";
   private t: Type = Type.ERROR;
   private rawType: string = "";
 
@@ -599,7 +582,7 @@ class QualifiedType implements Part {
   private isVolatile: boolean = false;
 
   private refQualifier: RefQualifier = RefQualifier.None;
-  private ref: QualifiedType | null = null;
+  private ref: QualifiedTypePart | null = null;
 
   public toString(): string {
     let str = this.t === Type.RAW ? this.rawType : this.t;
@@ -620,9 +603,10 @@ class QualifiedType implements Part {
     return str;
   }
 }
+checkPartCtor(QualifiedTypePart);
 
 // Function arguments
-class FunctionPart implements Part {
+class FunctionPart extends Part {
   public static parse(str: string, offset: number): ParseResult {
     const part = new FunctionPart(str, offset);
     if (!part.error) {
@@ -632,12 +616,14 @@ class FunctionPart implements Part {
   }
 
   private constructor(str: string, offset: number) {
+    super(PartType.Function);
+
     if (str.length - offset === 0) {
       this.error = "Function: No arguments";
       return;
     }
     while (offset + this.consumed < str.length) {
-      const param = QualifiedType.parse(str, offset + this.consumed);
+      const param = QualifiedTypePart.parse(str, offset + this.consumed);
       if (param.error) {
         this.error = param.error;
         return;
@@ -650,12 +636,10 @@ class FunctionPart implements Part {
     }
   }
 
-  public type: PartTypes = PartTypes.Function;
-  private consumed: number = 0;
-  private error: string = "";
   private parameters: Part[] = [];
 
   public toString(): string {
     return "(" + this.parameters.map((p) => p.toString()).join(", ") + ")";
   }
 }
+checkPartCtor(FunctionPart);
